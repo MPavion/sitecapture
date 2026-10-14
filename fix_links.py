@@ -61,6 +61,23 @@ def _path_to_url(local_path: str, base_dir: str) -> str:
     return f"https://{domain}/" + "/".join(path_parts) + "/"
 
 
+def _find_video_url_in_props(obj) -> str | None:
+    """Recursively walk a deserialised props object and return the first video URL found."""
+    if isinstance(obj, str):
+        return obj if _video_id(obj) else None
+    if isinstance(obj, (list, tuple)):
+        for item in obj:
+            r = _find_video_url_in_props(item)
+            if r:
+                return r
+    elif isinstance(obj, dict):
+        for v in obj.values():
+            r = _find_video_url_in_props(v)
+            if r:
+                return r
+    return None
+
+
 def _video_id(url: str) -> str | None:
     """Extract a normalised 'platform:id' key from a video embed URL."""
     lurl = url.lower()
@@ -217,6 +234,36 @@ def _replace_video_embeds(local_path: str, base_dir: str, id_map: dict) -> int:
             style = f"width:100%;max-width:{width}px;aspect-ratio:{width}/{height}"
         else:
             style = "width:100%;max-width:100%;aspect-ratio:16/9"
+
+        video_tag = soup.new_tag("video", controls=True, preload="metadata")
+        video_tag["style"] = style
+        video_tag.append(soup.new_tag("source", src=rel_to_page, type="video/mp4"))
+        tag.replace_with(video_tag)
+        replaced += 1
+
+    # Astro/React component islands that embed videos via JSON props
+    for tag in soup.find_all("astro-island"):
+        props_raw = tag.get("props", "")
+        if not props_raw:
+            continue
+        try:
+            props = json.loads(props_raw)
+        except Exception:
+            continue
+        vid_url = _find_video_url_in_props(props)
+        if not vid_url:
+            continue
+        vid_id = _video_id(vid_url)
+        if not vid_id or vid_id not in id_map:
+            continue
+
+        rel_media = id_map[vid_id]
+        media_abs = os.path.join(base_dir, rel_media.replace("/", os.sep))
+        if not os.path.exists(media_abs):
+            continue
+
+        rel_to_page = os.path.relpath(media_abs, page_dir).replace(os.sep, "/")
+        style = "width:100%;max-width:100%;aspect-ratio:16/9"
 
         video_tag = soup.new_tag("video", controls=True, preload="metadata")
         video_tag["style"] = style
