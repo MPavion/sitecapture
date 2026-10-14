@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+*.spec
+
+# Virtual environment
+venv/
+
+# App runtime data (user-specific, may contain credentials)
+projects/
+config.json
+_cookies.txt
+*.log
+
+# Generated files
+icon.ico
+icon.png
+icon.icns
+icon.iconset/
+
+# Mac build output
+*.dmg
+
+# Installer output
+installer_output/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Editor
+.vscode/
+.idea/
+*.swp
