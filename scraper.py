@@ -1,6 +1,7 @@
 import os
 import re
 import time
+import json
 import queue
 import threading
 from urllib.parse import urljoin, urlparse
@@ -187,14 +188,23 @@ def _rewrite_html(html_bytes: bytes, page_url: str, out: str, cfg: dict) -> byte
                     tag["srcset"] = ", ".join(entries)
 
         # ── Anchor links — rewrite page URLs for offline navigation ──
+        page_base = _base_domain(urlparse(page_url).netloc)
         for tag in soup.find_all("a", href=True):
             href = tag["href"]
-            if href.startswith(("http://", "https://")):
-                ext = _url_ext(href.split("?")[0])
-                if not ext or ext in {".html", ".htm", ".php", ".asp", ".aspx", ".cfm"}:
-                    r = _rel(href)
-                    if r:
-                        tag["href"] = r
+            lh = href.strip().lower()
+            if lh.startswith(("data:", "javascript:", "mailto:", "tel:")):
+                continue
+            abs_url = urljoin(page_url, href)
+            if not abs_url.startswith(("http://", "https://")):
+                continue
+            link_base = _base_domain(urlparse(abs_url).netloc)
+            if link_base != page_base and not link_base.endswith("." + page_base):
+                continue
+            ext = _url_ext(abs_url)
+            if not ext or ext in {".html", ".htm", ".php", ".asp", ".aspx", ".cfm"}:
+                r = _rel(href)
+                if r:
+                    tag["href"] = r
 
         return soup.encode("utf-8")
     except Exception:
@@ -238,6 +248,9 @@ class Scraper:
         self._pending_media  = set()
         self._media_lock     = threading.Lock()
         self._media_sem      = threading.Semaphore(2)
+        self._media_map      = {}
+        self._media_map_lock = threading.Lock()
+        self._media_map_path = None
 
     # ── public API ────────────────────────────────────────────────────────────
 
@@ -283,6 +296,17 @@ class Scraper:
         with self._media_lock:
             snap = set(self._pending_media)
         self._save_media_queue(snap)
+
+    def _save_media_map(self):
+        if not self._media_map_path:
+            return
+        with self._media_map_lock:
+            snap = dict(self._media_map)
+        try:
+            with open(self._media_map_path, "w", encoding="utf-8") as f:
+                json.dump(snap, f, indent=2)
+        except Exception as e:
+            self._log(f"  ⚠  Could not save media map: {e}")
 
     def start(self, start_url: str, output_dir: str):
         self._stop.clear()
@@ -330,6 +354,14 @@ class Scraper:
                 self._log(f"   ⚠  Could not load cookies file: {e}")
         self._start_url    = start_url
 
+        self._media_map_path = os.path.join(output_dir, "media_map.json")
+        if os.path.exists(self._media_map_path):
+            try:
+                with open(self._media_map_path, encoding="utf-8") as f:
+                    self._media_map = json.load(f)
+            except Exception:
+                self._media_map = {}
+
         base = urlparse(start_url).netloc
         depth = int(self._cfg.get("max_depth", 3))
         self._q.put((start_url, depth))
@@ -370,6 +402,7 @@ class Scraper:
             self._log("✔  Scrape finished.")
         self._flush_visited()
         self._flush_media_queue()
+        self._save_media_map()
         self._done()
 
     def _worker(self, output_dir: str, base_netloc: str):
@@ -622,7 +655,7 @@ class Scraper:
         except Exception as e:
             self._log(f"  ✗  Write error: {e}")
 
-    def _ytdlp_opts(self, out: str, domain: str) -> dict:
+    def _ytdlp_opts(self, out: str, domain: str, capture_paths: list | None = None) -> dict:
         """Shared yt-dlp options with a throttled progress hook."""
         tmpl = os.path.join(out, domain, "media", "%(title)s.%(ext)s")
 
@@ -651,6 +684,10 @@ class Scraper:
 
             elif status == "finished":
                 self._status("  ▶  Finalising…")
+                if capture_paths is not None:
+                    fp = d.get("filename") or d.get("_filename")
+                    if fp:
+                        capture_paths.append(fp)
 
         opts = {
             "outtmpl":           tmpl,
@@ -696,7 +733,8 @@ class Scraper:
         if not YTDLP_OK:
             return
         domain = urlparse(url).netloc
-        opts   = self._ytdlp_opts(out, domain)
+        captured: list[str] = []
+        opts   = self._ytdlp_opts(out, domain, capture_paths=captured)
         with self._media_lock:
             self._pending_media.add(url)
         self._flush_media_queue()
@@ -716,5 +754,21 @@ class Scraper:
                         with self._media_lock:
                             self._pending_media.discard(url)
                         self._flush_media_queue()
+                        # Map source URL → local file for offline video replacement
+                        filepath = None
+                        for dl in (info.get("requested_downloads") or []):
+                            fp = dl.get("filepath") or dl.get("_filename")
+                            if fp and os.path.exists(fp):
+                                filepath = fp
+                                break
+                        if not filepath:
+                            filepath = next(
+                                (p for p in reversed(captured) if os.path.exists(p)), None
+                            )
+                        if filepath:
+                            rel = os.path.relpath(filepath, out).replace(os.sep, "/")
+                            with self._media_map_lock:
+                                self._media_map[url] = rel
+                            self._save_media_map()
             except Exception:
                 pass

@@ -823,6 +823,11 @@ class App(ctk.CTk):
                 if self._active_project and self._active_project["id"] == p["id"]:
                     self._active_project = p
         self._running_pid = None
+        try:
+            import winsound
+            winsound.MessageBeep(winsound.MB_ICONASTERISK)
+        except Exception:
+            pass
         self.after(0, self._set_idle_buttons)
         self.after(0, self._refresh_sidebar)
 
