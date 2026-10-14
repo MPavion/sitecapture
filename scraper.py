@@ -132,6 +132,75 @@ def _base_domain(netloc: str) -> str:
     return netloc.replace("www.", "")
 
 
+def _rewrite_html(html_bytes: bytes, page_url: str, out: str, cfg: dict) -> bytes:
+    """Rewrite absolute asset URLs in HTML to relative local paths for offline viewing."""
+    if not BS4_OK:
+        return html_bytes
+    try:
+        soup  = BeautifulSoup(html_bytes, "lxml")
+        p_dir = os.path.dirname(_url_to_path(page_url, out))
+
+        def _rel(href: str):
+            if not href:
+                return None
+            lh = href.strip().lower()
+            if lh.startswith(("data:", "javascript:", "#", "mailto:", "tel:")):
+                return None
+            abs_url = urljoin(page_url, href)
+            if not abs_url.startswith(("http://", "https://")):
+                return None
+            try:
+                return os.path.relpath(_url_to_path(abs_url, out), p_dir).replace(os.sep, "/")
+            except ValueError:   # cross-drive on Windows
+                return None
+
+        # ── CSS & JS ──
+        if cfg.get("download_css_js"):
+            for tag in soup.find_all("link", href=True):
+                r = _rel(tag["href"])
+                if r:
+                    tag["href"] = r
+            for tag in soup.find_all("script", src=True):
+                r = _rel(tag["src"])
+                if r:
+                    tag["src"] = r
+
+        # ── Images ──
+        if cfg.get("download_images"):
+            for tag in soup.find_all(["img", "source"]):
+                for attr in ("src", "data-src", "data-lazy-src"):
+                    val = tag.get(attr, "")
+                    if val:
+                        r = _rel(val)
+                        if r:
+                            tag[attr] = r
+                val = tag.get("srcset", "")
+                if val:
+                    entries = []
+                    for entry in val.split(","):
+                        parts = entry.strip().split()
+                        if parts:
+                            r = _rel(parts[0])
+                            if r:
+                                parts[0] = r
+                            entries.append(" ".join(parts))
+                    tag["srcset"] = ", ".join(entries)
+
+        # ── Anchor links — rewrite page URLs for offline navigation ──
+        for tag in soup.find_all("a", href=True):
+            href = tag["href"]
+            if href.startswith(("http://", "https://")):
+                ext = _url_ext(href.split("?")[0])
+                if not ext or ext in {".html", ".htm", ".php", ".asp", ".aspx", ".cfm"}:
+                    r = _rel(href)
+                    if r:
+                        tag["href"] = r
+
+        return soup.encode("utf-8")
+    except Exception:
+        return html_bytes
+
+
 class Scraper:
     def __init__(self, cfg, on_log=None, on_progress=None, on_status=None,
                  on_done=None, on_stats=None, save_visited_cb=None,
@@ -414,7 +483,7 @@ class Scraper:
             return
 
         if self._cfg.get("download_html"):
-            self._write(out, url, resp.content)
+            self._write(out, url, _rewrite_html(resp.content, url, out, self._cfg))
             self._log(f"  ✓  {url}")
 
         self._stats["pages"] += 1
