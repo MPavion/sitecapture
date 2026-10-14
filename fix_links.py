@@ -293,6 +293,55 @@ def _replace_video_embeds(local_path: str, base_dir: str, id_map: dict) -> int:
     return replaced
 
 
+_ACCORDION_SCRIPT = """\
+<script>
+/* Offline accordion fix: plain script, bypasses ES module system */
+document.addEventListener('DOMContentLoaded',function(){
+  document.querySelectorAll('._accordionsContainer_xr1jn_6').forEach(function(c){
+    c.querySelectorAll('._accordion_dt6m5_1').forEach(function(item){
+      var btn=item.querySelector('._accordionButton_dt6m5_15');
+      var wrap=item.querySelector('._accordionContentWrapper_dt6m5_55');
+      if(!btn||!wrap)return;
+      btn.addEventListener('click',function(){
+        if(item.classList.contains('_active_dt6m5_11')){
+          item.classList.remove('_active_dt6m5_11');
+          btn.setAttribute('aria-expanded','false');
+          wrap.style.maxHeight='0px';
+        }else{
+          item.classList.add('_active_dt6m5_11');
+          btn.setAttribute('aria-expanded','true');
+          wrap.style.maxHeight=wrap.scrollHeight+'px';
+        }
+      });
+    });
+  });
+});
+</script>"""
+
+
+def fix_accordions(base_dir: str) -> int:
+    """Inject inline accordion toggle script into pages that need it. Returns count of pages patched."""
+    patched = 0
+    for root, _dirs, files in os.walk(base_dir):
+        for fname in files:
+            if not fname.lower().endswith((".html", ".htm")):
+                continue
+            path = os.path.join(root, fname)
+            with open(path, "rb") as f:
+                content = f.read().decode("utf-8", errors="replace")
+            if "_accordionButton_" not in content:
+                continue
+            if "Offline accordion fix" in content:
+                continue
+            new_content = content.replace("</body>", _ACCORDION_SCRIPT + "\n</body>", 1)
+            if new_content == content:
+                continue
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(new_content)
+            patched += 1
+    return patched
+
+
 def fix_video_embeds(base_dir: str) -> tuple[int, int]:
     """
     Replace external video iframes with local <video> tags using media_map.json.
@@ -366,8 +415,16 @@ def main():
                 print(f"  ✗  {os.path.relpath(path, base_dir)}: {e}")
     print(f"  {total} files scanned, {link_changed} rewritten, {errors} errors.\n")
 
-    # ── Pass 2: replace video embeds ──
-    print("Pass 2: replacing video iframes with local players…")
+    # ── Pass 2: inject accordion fix ──
+    print("Pass 2: injecting offline accordion script…")
+    acc_patched = fix_accordions(base_dir)
+    if acc_patched:
+        print(f"  {acc_patched} page(s) patched with accordion script.")
+    else:
+        print("  No accordion pages needed patching.")
+
+    # ── Pass 3: replace video embeds ──
+    print("Pass 3: replacing video iframes with local players…")
     vid_files, vid_total = fix_video_embeds(base_dir)
     if vid_total:
         print(f"  {vid_total} iframe(s) replaced across {vid_files} file(s).")
