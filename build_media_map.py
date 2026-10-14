@@ -1,12 +1,13 @@
 """
 build_media_map.py — populate media_map.json from already-downloaded video files.
 
-Scans all HTML files in the output folder for video embed URLs, uses yt-dlp in
-info-only mode (no re-download) to fetch the canonical title for each URL, then
-fuzzy-matches that title against the .mp4 files already on disk to build the
-source_url → local_relative_path mapping.
+Scans all HTML files in the output folder for video embed URLs, fetches the
+canonical title for each via platform APIs (Wistia oEmbed, yt-dlp fallback),
+then fuzzy-matches that title against the .mp4 files already on disk to build
+the source_url → local_relative_path mapping.
 
-Requires: yt-dlp, beautifulsoup4, internet access (info queries only, ~1s each)
+Requires: beautifulsoup4, internet access (info queries only, no re-downloading)
+Optional: yt-dlp (used as fallback for non-Wistia platforms)
 
 Usage:
     python build_media_map.py "<output_folder>"
@@ -20,6 +21,7 @@ import sys
 import json
 import re
 import difflib
+import urllib.request
 from urllib.parse import urlparse
 
 try:
@@ -28,9 +30,9 @@ except ImportError:
     sys.exit("Error: beautifulsoup4 not installed. Run: pip install beautifulsoup4 lxml")
 
 try:
-    import yt_dlp
+    import yt_dlp as _yt_dlp
 except ImportError:
-    sys.exit("Error: yt-dlp not installed. Run: pip install yt-dlp")
+    _yt_dlp = None
 
 
 # ── video ID helpers (mirrors fix_links.py) ──────────────────────────────────
@@ -152,36 +154,40 @@ def best_match(title: str, local_videos: list[tuple[str, str]]) -> tuple[str, fl
     return local_videos[idx][1], score
 
 
-# ── yt-dlp info fetch ─────────────────────────────────────────────────────────
-
-def fetch_video_title(url: str) -> str | None:
-    """Use yt-dlp in info-only mode to get the video title. Returns None on failure."""
-    ydl_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-        "noplaylist": True,
-    }
-    try:
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-            return info.get("title") if info else None
-    except Exception:
-        return None
-
-
-# ── Wistia direct API fallback ────────────────────────────────────────────────
+# ── title fetchers ────────────────────────────────────────────────────────────
 
 def fetch_wistia_title(media_id: str) -> str | None:
-    """Try Wistia's public oEmbed API (no auth needed for public videos)."""
+    """Wistia public oEmbed API — no auth needed, no yt-dlp required."""
     try:
-        import urllib.request
         api_url = f"https://fast.wistia.com/oembed?url=https://home.wistia.com/medias/{media_id}"
         with urllib.request.urlopen(api_url, timeout=10) as resp:
             data = json.loads(resp.read())
             return data.get("title")
     except Exception:
         return None
+
+
+def fetch_title_ytdlp(url: str) -> str | None:
+    """Use yt-dlp in info-only mode (fallback for non-Wistia platforms)."""
+    if _yt_dlp is None:
+        return None
+    ydl_opts = {"quiet": True, "no_warnings": True, "skip_download": True, "noplaylist": True}
+    try:
+        with _yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+            return info.get("title") if info else None
+    except Exception:
+        return None
+
+
+def fetch_video_title(url: str) -> str | None:
+    """Return the video title, trying platform-specific APIs before yt-dlp."""
+    lurl = url.lower()
+    if "wistia" in lurl:
+        m = re.search(r"/(?:medias|iframes)/([a-zA-Z0-9]+)", url)
+        if m:
+            return fetch_wistia_title(m.group(1))
+    return fetch_title_ytdlp(url)
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
@@ -226,13 +232,7 @@ def main():
     for i, url in enumerate(new_urls, 1):
         print(f"[{i}/{len(new_urls)}] {url}")
 
-        # Try to get title via yt-dlp, with Wistia API as fallback
         title = fetch_video_title(url)
-        if not title:
-            # Wistia fallback
-            m = re.search(r"/(?:medias|iframes)/([a-zA-Z0-9]+)", url)
-            if m:
-                title = fetch_wistia_title(m.group(1))
 
         if not title:
             print(f"  ✗  Could not fetch title — skipping")
