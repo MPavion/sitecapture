@@ -186,6 +186,21 @@ def rewrite_file(local_path: str, base_dir: str) -> bool:
                 if r:
                     tag["href"] = r
 
+        # Inline scripts: rewrite JS navigation variables that hold absolute paths
+        # (e.g. `const nextUrl = "/course/.../lesson/slug"` → relative path)
+        for tag in soup.find_all("script"):
+            txt = tag.string
+            if not txt or "nextUrl" not in txt:
+                continue
+
+            def _sub_js_url(m, _rel=_rel):
+                r = _rel(m.group(1))
+                return f'const nextUrl = "{r}"' if r else m.group(0)
+
+            new_txt = re.sub(r'const nextUrl = "(/[^"]+)"', _sub_js_url, txt)
+            if new_txt != txt:
+                tag.string.replace_with(new_txt)
+
         rewritten = soup.encode("utf-8")
     except Exception as e:
         print(f"  ✗  Parse error [{local_path}]: {e}")
